@@ -1,4 +1,4 @@
 variable "key_pair_name" {
-  description = "Nombre del par de llaves existente en tu cuenta de AWS (debes crearlo en EC2 -> Key Pairs)"
+  description = "Nombre del par de llaves EC2 (sin .pem) que ya existe en tu cuenta AWS."
   type        = string
 }

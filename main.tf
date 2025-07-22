@@ -1,3 +1,13 @@
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
 provider "aws" {
   region = "us-east-1"
 }
@@ -26,7 +36,7 @@ resource "aws_internet_gateway" "gw" {
 }
 
 # -------------------
-# Subnets
+# Subnets (2 AZs para RDS)
 # -------------------
 resource "aws_subnet" "public_subnet_a" {
   vpc_id                  = aws_vpc.main_vpc.id
@@ -51,7 +61,7 @@ resource "aws_subnet" "public_subnet_b" {
 }
 
 # -------------------
-# Route Table & Association
+# Route Table & Associations
 # -------------------
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.main_vpc.id
@@ -77,13 +87,14 @@ resource "aws_route_table_association" "public_assoc_b" {
 }
 
 # -------------------
-# Security Groups
+# Security Group: EC2 (SSH + HTTP)
 # -------------------
 resource "aws_security_group" "ec2_sg" {
   name        = "ec2-sg"
   description = "Allow SSH and HTTP"
   vpc_id      = aws_vpc.main_vpc.id
 
+  # SSH
   ingress {
     from_port   = 22
     to_port     = 22
@@ -91,6 +102,7 @@ resource "aws_security_group" "ec2_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # HTTP
   ingress {
     from_port   = 80
     to_port     = 80
@@ -98,6 +110,7 @@ resource "aws_security_group" "ec2_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Outbound all
   egress {
     from_port   = 0
     to_port     = 0
@@ -110,6 +123,9 @@ resource "aws_security_group" "ec2_sg" {
   }
 }
 
+# -------------------
+# Security Group: RDS (solo tráfico desde EC2 SG)
+# -------------------
 resource "aws_security_group" "rds_sg" {
   name        = "rds-sg"
   description = "Allow MySQL from EC2"
@@ -135,7 +151,7 @@ resource "aws_security_group" "rds_sg" {
 }
 
 # -------------------
-# RDS MySQL (Free Tier)
+# RDS Subnet Group (2 AZs)
 # -------------------
 resource "aws_db_subnet_group" "rds_subnet_group" {
   name       = "rds-subnet-group"
@@ -149,12 +165,15 @@ resource "aws_db_subnet_group" "rds_subnet_group" {
   }
 }
 
+# -------------------
+# RDS MySQL (Free Tier)
+# -------------------
 resource "aws_db_instance" "mysql_db" {
   identifier              = "wolf-db"
   allocated_storage       = 20
   engine                  = "mysql"
   engine_version          = "8.0"
-  instance_class          = "db.t3.micro"
+  instance_class          = "db.t3.micro"   # Free Tier elegible
   username                = "admin"
   password                = "wolfpassword123"
   db_name                 = "inventory_db"
@@ -164,16 +183,18 @@ resource "aws_db_instance" "mysql_db" {
   skip_final_snapshot     = true
   multi_az                = false
 
+  # Nota: RDS tarda varios minutos; user_data en EC2 hace un sleep antes de conectarse.
+
   tags = {
     Name = "wolf-mysql-db"
   }
 }
 
 # -------------------
-# EC2 Instance (Web Server)
+# EC2 Instance (Web Server + Docker + App)
 # -------------------
 resource "aws_instance" "ubuntu_server" {
-  ami                         = "ami-053b0d53c279acc90" # Ubuntu 22.04 LTS
+  ami                         = "ami-053b0d53c279acc90" # Ubuntu 22.04 LTS us-east-1
   instance_type               = "t2.micro"
   subnet_id                   = aws_subnet.public_subnet_a.id
   associate_public_ip_address = true
@@ -182,41 +203,53 @@ resource "aws_instance" "ubuntu_server" {
 
   user_data = <<-EOF
               #!/bin/bash
+              set -xe
+
+              # Actualizar e instalar dependencias
               apt-get update -y
-              apt-get install -y docker.io docker-compose git mysql-client
+              apt-get install -y docker.io docker-compose-plugin git mysql-client
+
               systemctl enable docker
               systemctl start docker
 
-              # Clonar el repositorio con la app
-              git clone https://github.com/marioJRDZGarcia/openaiterraformwolf.git /opt/app
+              # Clonar el repo (si ya existe, actualizar)
+              if [ ! -d /opt/app ]; then
+                git clone https://github.com/marioJRDZGarcia/openaiterraformwolf.git /opt/app
+              else
+                cd /opt/app && git pull || true
+              fi
+
               cd /opt/app/app
 
-              # Variables de entorno para Flask
-              echo "DB_HOST=${aws_db_instance.mysql_db.endpoint}" > .env
-              echo "DB_USER=admin" >> .env
-              echo "DB_PASS=wolfpassword123" >> .env
-              echo "DB_NAME=inventory_db" >> .env
+              # Crear archivo .env con datos del RDS
+              cat > .env <<ENVVARS
+              DB_HOST=${aws_db_instance.mysql_db.endpoint}
+              DB_USER=admin
+              DB_PASS=wolfpassword123
+              DB_NAME=inventory_db
+              ENVVARS
 
-              # Esperar a que RDS esté lista
-              sleep 60
-              mysql -h ${aws_db_instance.mysql_db.endpoint} -u admin -pwolfpassword123 -e "CREATE TABLE IF NOT EXISTS inventory_db.inventory (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100), quantity INT);"
+              # Esperar a que la base esté disponible (loop simple)
+              for i in {1..30}; do
+                if mysql -h ${aws_db_instance.mysql_db.endpoint} -u admin -pwolfpassword123 -e "SELECT 1" >/dev/null 2>&1; then
+                  break
+                fi
+                sleep 10
+              done
+
+              # Crear tabla si no existe
+              mysql -h ${aws_db_instance.mysql_db.endpoint} -u admin -pwolfpassword123 -D inventory_db -e "CREATE TABLE IF NOT EXISTS inventory (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100), quantity INT);"
 
               # Levantar contenedor Flask
-              docker-compose up -d
+              # docker compose (plugin) o docker-compose fallback
+              if command -v docker-compose >/dev/null 2>&1; then
+                docker-compose up -d
+              else
+                docker compose up -d
+              fi
               EOF
 
   tags = {
     Name = "ubuntu-server"
   }
-}
-
-# -------------------
-# Outputs
-# -------------------
-output "ec2_public_ip" {
-  value = aws_instance.ubuntu_server.public_ip
-}
-
-output "rds_endpoint" {
-  value = aws_db_instance.mysql_db.endpoint
 }
