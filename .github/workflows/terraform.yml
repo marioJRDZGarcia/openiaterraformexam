@@ -1,10 +1,12 @@
-name: Terraform Deploy
+name: Terraform Deploy or Destroy
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch: # Permite ejecutarlo manualmente desde Actions
+    inputs:
+      action:
+        description: "Acción a ejecutar (apply o destroy)"
+        required: true
+        default: "apply"
 
 jobs:
   terraform:
@@ -14,7 +16,7 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: us-east-1
-      TF_VAR_key_pair_name: wolf  # Cambia 'wolf' si tu key pair en AWS tiene otro nombre
+      TF_VAR_key_pair_name: wolf  # Cambia 'wolf' si tu key pair tiene otro nombre
 
     steps:
       - name: Checkout repo
@@ -26,11 +28,15 @@ jobs:
           terraform_version: 1.5.7
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform init -upgrade
 
       - name: Terraform Plan
         run: terraform plan -out=tfplan
 
       - name: Terraform Apply
-        if: github.ref == 'refs/heads/main'
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: ${{ github.event.inputs.action == 'destroy' }}
+        run: terraform destroy -auto-approve
