@@ -59,7 +59,7 @@ resource "aws_route_table" "public_rt" {
   }
 }
 
-# Asociar subredes a route table
+# Asociar subredes a la route table
 resource "aws_route_table_association" "public_assoc_a" {
   subnet_id      = aws_subnet.public_subnet_a.id
   route_table_id = aws_route_table.public_rt.id
@@ -126,7 +126,7 @@ resource "aws_instance" "ubuntu_server" {
               systemctl start docker
 
               # Clonar la app
-              git clone https://github.com/marioJRDZGarcia/openaiterraformwolf.git /opt/app
+              git clone https://github.com/marioJRDZGarcia/openaiterraformwolf.git /opt/app || true
 
               cd /opt/app/app
               docker-compose down || true
@@ -165,18 +165,18 @@ resource "aws_security_group" "rds_sg" {
 
 # Subnet group para RDS
 resource "aws_db_subnet_group" "rds_subnet_group" {
-  name       = "rds-subnet-group"
+  name_prefix = "wolf-rds-"
   subnet_ids = [
     aws_subnet.public_subnet_a.id,
     aws_subnet.public_subnet_b.id
   ]
 
   tags = {
-    Name = "rds-subnet-group"
+    Name = "wolf-rds-subnet-group"
   }
 }
 
-# Instancia RDS MySQL (Free Tier)
+# Instancia RDS MySQL
 resource "aws_db_instance" "mysql_db" {
   identifier              = "wolf-db"
   allocated_storage       = 20
